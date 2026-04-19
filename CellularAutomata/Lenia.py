@@ -5,33 +5,37 @@ import cupy as cp
 
 #CONSTANTES
 sim_w, sim_h = 512, 512
-R = 13 
-K = 2 * R + 1 
-dt = 0.05
-
-mu = 0.5
-sigma = 0.15
-
-y, x = np.ogrid[-R:R+1, -R:R+1] #creation de 2 vecteurs pour faire le tableau du kernel
-r = np.sqrt(x*x + y*y) / R #broadcasting puis normalisée avec / R
-
-K_np = np.exp(-(r - mu)**2 / (2 * sigma**2)) #poids du kernel
-K_np[r > 1] = 0.0 #masking : on veut un disque donc comme r normalisé si r>1 on est hors du disque
-K_np /= K_np.sum() #normalisation
-
-kernel = cp.zeros((sim_h, sim_w), dtype=cp.float32) #tableau rempli de 0 de taille sim_h, sim_w nécessaire pour fft
-kernel[:K, :K] = cp.asarray(K_np) #on met le petit kernel de rayon R dans le grand tableau en haut à gauche pour fft
-
-kernel = cp.roll(kernel, -R, axis=0)
-kernel = cp.roll(kernel, -R, axis=1) #centrage du centre du kernel pour appliquer fft
-
-kernel /= kernel.sum() #normalisation
-kernel_fft = cp.fft.fft2(kernel) #on applique la fft
+R = 13.0
+dt = 0.02
 
 ti.init(arch=ti.gpu, random_seed=int(time.time()))
 
 grid = ti.field(ti.f32, shape=(sim_w, sim_h))
 potential = ti.field(ti.f32, shape=(sim_w, sim_h))
+kernel = ti.field(ti.f32, shape=(sim_w, sim_h))
+
+@ti.kernel
+def build_kernel():
+    mu = 0.5
+    sigma = 0.15
+    for i, j in kernel:
+        dx = float(i)
+        dy = float(j)
+
+        if dx > sim_w / 2.0: dx -= sim_w
+        if dy > sim_h / 2.0: dy -= sim_h
+
+        dist = ti.sqrt(dx**2 + dy**2) / R
+
+        if dist <= 1.0:
+            kernel[i, j] = ti.exp(-(dist - mu)**2 / (2 * sigma**2))
+        else:
+            kernel[i, j] = 0.0
+
+build_kernel()
+K_cp = cp.asarray(kernel.to_numpy())
+K_cp /= K_cp.sum()
+kernel_fft = cp.fft.fft2(K_cp)
 
 @ti.kernel
 def init_random(density: float):
@@ -56,24 +60,25 @@ def step():
     for i, j in grid:
         u = potential[i, j]
         v = grid[i, j] + dt * growth(u)
-        grid[i, j] = ti.max(0.0, ti.min(1.0, v)) #on s'assure de rester en 0 et 1
+        grid[i, j] = ti.max(0.0, ti.min(1.0, v))
 
 X_cp = cp.zeros((sim_h, sim_w), dtype=cp.float32)
 
 def fft_convolve():
-    X_cp = cp.asarray(grid.to_numpy())
+    X_cp[:] = cp.asarray(grid.to_numpy())
     grid_fft = cp.fft.fft2(X_cp) #fft de la grille
-    result_fft = grid_fft * kernel_fft #covolution avec le noyau
+    result_fft = grid_fft * kernel_fft #convolution avec le noyau
     U_cp = cp.real(cp.fft.ifft2(result_fft)) #fft inverse
     potential.from_numpy(cp.asnumpy(U_cp))
 
 init_random(0.205457)
 
-gui = ti.GUI("Lenia", res=(sim_w, sim_h))
+window = ti.ui.Window("Lenia GGUI", (sim_w, sim_h))
+canvas = window.get_canvas()
 
-while gui.running:
+while window.running:
     fft_convolve()
     step()
-    gui.set_image(grid)
-    gui.show()
+    canvas.set_image(grid)
+    window.show()
 

@@ -1,13 +1,11 @@
 
 import taichi as ti
-import taichi.math as tm
-
 import time
 
 
 #CONSTANTES
-Ra = 12 #rayon interne
-Rb = 3*Ra #rayon externe
+Ra = 12.0 #rayon interne
+Rb = 3.0*Ra #rayon externe
 b1, b2 = 0.257, 0.336 #zone de naissance
 d1, d2 = 0.365, 0.549 #zone de survie
 dt = 0.1
@@ -18,25 +16,26 @@ sim_w, sim_h = 512, 512
 
 ti.init(arch=ti.gpu, random_seed=int(time.time()))
 
-grid = ti.field(dtype=ti.f32, shape=(sim_w, sim_h))
-grid_tmp = ti.field(dtype=ti.f32, shape=(sim_w, sim_h))
+grid = ti.field(dtype=ti.f32, shape=(sim_w, sim_h, 2))
+display = ti.field(dtype=ti.f32, shape=(sim_w, sim_h))
 
 @ti.kernel
-def init_random(grid: ti.template(), density: float):
-    for i, j in grid:
+def init_random(density: float):
+    for i, j in ti.ndrange(sim_w, sim_h):
         if ti.random() < density:
-            grid[i, j] = ti.random()
+            grid[i, j, 0] = ti.random()
+        else:
+            grid[i, j, 0] = 0.0
 
 
 @ti.kernel
-def init_shapes(grid: ti.template(), cx: float, cy: float, r: float):
-
-    for i, j in grid:
-        if (i - cx)**2 + (j - cy)**2 < r**2: # Cercle de rayon 63
-            grid[i, j] = ti.random()
+def init_shapes(cx: float, cy: float, r: float):
+    for i, j in ti.ndrange(sim_w, sim_h):
+        if (i - cx)**2 + (j - cy)**2 < r**2:
+            grid[i, j, 0] = ti.random()
 
 @ti.func
-def get_integrals(x, y, grid: ti.template()):
+def get_integrals(x, y, phase: ti.i32):
     sum_m = 0.0
     sum_n = 0.0
     count_m = 0.0
@@ -51,12 +50,18 @@ def get_integrals(x, y, grid: ti.template()):
         for j in range(-limit, limit + 1):
             
             d2 = float(i*i + j*j)
-            
             if d2 >= Rb2: continue
 
-            x_nb = (x + i + sim_w) % sim_w
-            y_nb = (y + j + sim_h) % sim_h
-            val = grid[x_nb, y_nb]
+            x_nb = x + i
+            y_nb = y + j
+
+            if x_nb < 0: x_nb += sim_w
+            elif x_nb >= sim_w: x_nb -= sim_w
+            
+            if y_nb < 0: y_nb += sim_h
+            elif y_nb >= sim_h: y_nb -= sim_h
+
+            val = grid[x_nb, y_nb, phase]
             
             if d2 < Ra2:
                 sum_m += val
@@ -89,32 +94,42 @@ def s(n, m):
     return sigma_2(n, sigma_m(b1, d1, m), sigma_m(b2, d2, m))
 
 @ti.kernel
-def step(grid_r: ti.template(), grid_w: ti.template()):
-    for i, j in grid_r:
-        m, n = get_integrals(i, j, grid_r)
+def step(phase: ti.i32):
+    next_phase = 1 - phase
+    for i, j in ti.ndrange(sim_w, sim_h):
+        m, n = get_integrals(i, j, phase)
 
         target = s(n, m)
 
-        grid_w[i, j] = grid_r[i, j] + (target - grid_r[i, j]) * dt
+        grid[i, j, next_phase] = grid[i, j, phase] + (target - grid[i, j, phase]) * dt
         
+@ti.kernel
+def update_display(phase: ti.i32):
+    for i, j in display:
+        display[i, j] = grid[i, j, phase]
 
-r = 80
+r = 87
 for a in range(1, 2):
     cx = sim_w - a * 150
     cy = sim_h - a * 150
-    init_shapes(grid, cx, cy, r)
+    init_shapes(cx, cy, r)
 
-init_random(grid, 0.045)
 
-gui = ti.GUI("Smooth Life", res=(sim_w, sim_h))
 
-while gui.running:
-    step(grid, grid_tmp)
-    grid, grid_tmp = grid_tmp, grid
+window = ti.ui.Window("Smooth Life GGUI", (sim_w, sim_h))
+canvas = window.get_canvas()
 
-    gui.set_image(grid)
-    gui.show()
+phase = 0
 
+while window.running:
+    step(phase)
+    
+    update_display(1 - phase)
+
+    canvas.set_image(display)
+    window.show()
+
+    phase = 1 - phase
     
 
 
